@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Avatar Live — Real-Time Streaming</title>
+  <meta name="description" content="Real-time conversational AI avatar powered by Moshi + AvatarForcing" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-deep:    #070b14;
+      --bg-card:    #0d1526;
+      --bg-glass:   rgba(13,21,38,0.85);
+      --accent-1:   #3b82f6;
+      --accent-2:   #8b5cf6;
+      --accent-3:   #06b6d4;
+      --success:    #22c55e;
+      --warning:    #f59e0b;
+      --danger:     #ef4444;
+      --text-1:     #f0f4ff;
+      --text-2:     #94a3b8;
+      --text-3:     #64748b;
+      --border:     rgba(255,255,255,0.07);
+      --glow-1:     rgba(59,130,246,0.35);
+      --glow-2:     rgba(139,92,246,0.25);
+      --radius:     16px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-deep);
+      color: var(--text-1);
+      font-family: 'Inter', system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── Animated background ─────────────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 10%, rgba(59,130,246,0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 80%, rgba(139,92,246,0.10) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 40% at 50% 50%, rgba(6,182,212,0.06) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .app {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-rows: 56px 1fr;
+      height: 100vh;
+    }
+
+    /* ── Header ──────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      background: rgba(7,11,20,0.8);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .logo-icon {
+      width: 28px; height: 28px;
+      background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-2);
+      transition: all .3s;
+    }
+
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--text-3);
+      transition: background .3s;
+    }
+
+    .status-pill.connected .status-dot { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    .status-pill.streaming .status-dot { background: var(--accent-1); box-shadow: 0 0 8px var(--accent-1); animation: pulse 1.2s infinite; }
+    .status-pill.error    .status-dot { background: var(--danger); }
+
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* ── Main layout ─────────────────────────────────────────────── */
+    main {
+      display: grid;
+      grid-template-columns: 320px 1fr 280px;
+      gap: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar left ────────────────────────────────────────────── */
+    .sidebar-left {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 20px 16px;
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      backdrop-filter: blur(8px);
+    }
+
+    .card-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 12px;
+    }
+
+    /* ── Image upload ────────────────────────────────────────────── */
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 24px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all .25s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .upload-zone:hover {
+      border-color: var(--accent-1);
+      background: rgba(59,130,246,0.05);
+    }
+
+    .upload-zone.has-image {
+      border-color: var(--success);
+      padding: 0;
+    }
+
+    .upload-zone img {
+      width: 100%;
+      height: 160px;
+      object-fit: cover;
+      border-radius: 10px;
+      display: block;
+    }
+
+    .upload-zone input { display: none; }
+
+    .upload-icon { font-size: 32px; margin-bottom: 8px; }
+    .upload-text { font-size: 13px; color: var(--text-2); }
+    .upload-sub  { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+
+    /* ── Buttons ─────────────────────────────────────────────────── */
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 11px 16px;
+      border: none;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+      letter-spacing: .01em;
+    }
+
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+      color: white;
+      box-shadow: 0 4px 16px var(--glow-1);
+    }
+    .btn-primary:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px var(--glow-1);
+    }
+
+    .btn-danger {
+      background: rgba(239,68,68,0.15);
+      color: var(--danger);
+      border: 1px solid rgba(239,68,68,0.3);
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: rgba(239,68,68,0.25);
+    }
+
+    .btn-success {
+      background: rgba(34,197,94,0.15);
+      color: var(--success);
+      border: 1px solid rgba(34,197,94,0.3);
+    }
+
+    /* ── Controls ────────────────────────────────────────────────── */
+    .session-id-box {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-3);
+      word-break: break-all;
+      line-height: 1.5;
+    }
+
+    /* ── Center: video ────────────────────────────────────────────── */
+    .video-area {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 24px;
+      position: relative;
+      background:
+        repeating-linear-gradient(
+          0deg,
+          transparent,
+          transparent 39px,
+          rgba(255,255,255,0.015) 39px,
+          rgba(255,255,255,0.015) 40px
+        ),
+        repeating-linear-gradient(
+          90deg,
+          transparent,
+          transparent 39px,
+          rgba(255,255,255,0.015) 39px,
+          rgba(255,255,255,0.015) 40px
+        );
+    }
+
+    .video-wrapper {
+      position: relative;
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow:
+        0 0 0 1px var(--border),
+        0 24px 80px rgba(0,0,0,0.6),
+        0 0 60px var(--glow-2);
+      background: #000;
+      max-width: 640px;
+      width: 100%;
+    }
+
+    #avatar-canvas {
+      width: 100%;
+      aspect-ratio: 832/480;
+      display: block;
+      background: #000;
+    }
+
+    .video-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(7,11,20,0.85);
+      backdrop-filter: blur(4px);
+      transition: opacity .5s;
+    }
+
+    .video-overlay.hidden { opacity: 0; pointer-events: none; }
+
+    .idle-indicator {
+      text-align: center;
+    }
+
+    .idle-ring {
+      width: 72px; height: 72px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent-1);
+      margin: 0 auto 16px;
+      animation: spin 2s linear infinite;
+    }
+
+    .idle-ring.ready {
+      border-top-color: var(--success);
+      animation: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .idle-text {
+      font-size: 14px;
+      color: var(--text-2);
+      font-weight: 500;
+    }
+
+    .idle-sub {
+      font-size: 12px;
+      color: var(--text-3);
+      margin-top: 4px;
+    }
+
+    /* Audio visualiser */
+    .audio-vis {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 40px;
+    }
+
+    .vis-bar {
+      width: 4px;
+      background: linear-gradient(to top, var(--accent-1), var(--accent-2));
+      border-radius: 2px;
+      min-height: 4px;
+      transition: height .05s;
+    }
+
+    /* ── Right sidebar: stats ─────────────────────────────────────── */
+    .sidebar-right {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      padding: 20px 16px;
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+    }
+
+    .metric-group {
+      margin-bottom: 20px;
+    }
+
+    .metric {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: var(--text-3);
+    }
+
+    .metric-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-1);
+    }
+
+    .metric-value.good  { color: var(--success); }
+    .metric-value.warn  { color: var(--warning); }
+    .metric-value.bad   { color: var(--danger); }
+
+    /* Queue bar */
+    .queue-bar-wrap {
+      margin-top: 4px;
+    }
+    .queue-label {
+      font-size: 11px;
+      color: var(--text-3);
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .queue-bar {
+      height: 4px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 2px;
+      margin-bottom: 6px;
+      overflow: hidden;
+    }
+    .queue-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+      transition: width .3s;
+    }
+
+    /* Log box */
+    .log-box {
+      background: rgba(0,0,0,0.3);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--text-3);
+      height: 120px;
+      overflow-y: auto;
+      line-height: 1.7;
+    }
+
+    .log-box .log-info  { color: var(--accent-3); }
+    .log-box .log-ok    { color: var(--success); }
+    .log-box .log-warn  { color: var(--warning); }
+    .log-box .log-error { color: var(--danger); }
+
+    /* Mic ring */
+    .mic-ring {
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      transition: all .2s;
+    }
+
+    .mic-ring.active {
+      border-color: var(--danger);
+      background: rgba(239,68,68,0.1);
+      box-shadow: 0 0 20px rgba(239,68,68,0.4);
+      animation: pulse-ring 1s infinite;
+    }
+
+    @keyframes pulse-ring {
+      0%,100% { box-shadow: 0 0 10px rgba(239,68,68,0.3); }
+      50%      { box-shadow: 0 0 25px rgba(239,68,68,0.6); }
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <!-- ── Header ──────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🎭</div>
+      AI Avatar Live
+    </div>
+    <div class="header-right">
+      <div class="status-pill" id="status-pill">
+        <div class="status-dot"></div>
+        <span id="status-text">Disconnected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main ────────────────────────────────────────────────── -->
+  <main>
+    <!-- ── Left sidebar ──────────────────────────────────────── -->
+    <aside class="sidebar-left">
+
+      <div class="card">
+        <div class="card-title">Reference Face</div>
+        <div class="upload-zone" id="upload-zone">
+          <input type="file" id="img-input" accept="image/*" />
+          <div class="upload-icon">🖼️</div>
+          <div class="upload-text">Click to upload face image</div>
+          <div class="upload-sub">JPG / PNG · Frontal face</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Session</div>
+        <div class="session-id-box" id="session-id-display">No session</div>
+      </div>
+
+      <div class="card" style="display:flex;flex-direction:column;gap:10px">
+        <div class="card-title">Controls</div>
+        <button class="btn btn-primary" id="btn-start" disabled>
+          <span>🚀</span> Start Session
+        </button>
+        <button class="btn btn-success" id="btn-mic" disabled>
+          <div class="mic-ring" id="mic-ring">🎙️</div>
+          Start Talking
+        </button>
+        <button class="btn btn-danger" id="btn-stop" disabled>
+          <span>⏹</span> Stop
+        </button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Audio Level</div>
+        <div class="audio-vis" id="audio-vis">
+          <!-- bars added by JS -->
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- ── Video center ───────────────────────────────────────── -->
+    <section class="video-area">
+      <div class="video-wrapper">
+        <canvas id="avatar-canvas" width="832" height="480"></canvas>
+        <div class="video-overlay" id="video-overlay">
+          <div class="idle-indicator">
+            <div class="idle-ring" id="idle-ring"></div>
+            <div class="idle-text" id="idle-text">Upload a face image to begin</div>
+            <div class="idle-sub" id="idle-sub">Then click Start Session</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Right sidebar ─────────────────────────────────────── -->
+    <aside class="sidebar-right">
+      <div class="card-title">Live Stats</div>
+
+      <div class="metric-group">
+        <div class="metric">
+          <span class="metric-label">Audio Latency</span>
+          <span class="metric-value" id="stat-audio-lat">—</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Video FPS</span>
+          <span class="metric-value" id="stat-fps">—</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Frames Rx</span>
+          <span class="metric-value" id="stat-frames">0</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Audio Pkts</span>
+          <span class="metric-value" id="stat-audio-pkts">0</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Seq ID</span>
+          <span class="metric-value" id="stat-seq">0</span>
+        </div>
+      </div>
+
+      <div class="card-title" style="margin-top:8px">Queues</div>
+      <div id="queue-bars"></div>
+
+      <div class="card-title" style="margin-top:16px">Log</div>
+      <div class="log-box" id="log-box"></div>
+    </aside>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

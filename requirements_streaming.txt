@@ -1,0 +1,52 @@
+# ── Streaming Server — Python Requirements ────────────────────────────────────
+# Install with: pip install -r requirements_streaming.txt
+
+# ── Core server framework ──────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+python-multipart>=0.0.9
+
+# ── Already required by unified pipeline (listed for completeness) ─────────────
+# torch>=2.5.0             # install separately with CUDA
+# torchvision
+# torchaudio
+moshi==0.2.4
+sphn>=0.1.4
+sentencepiece>=0.1.99
+transformers==4.41.2
+accelerate==0.31.0
+diffusers==0.30.0
+peft==0.13.0
+omegaconf>=2.3.0
+einops>=0.7.0
+ftfy
+easydict
+safetensors>=0.4.0
+huggingface_hub>=0.23.0
+pyyaml>=6.0
+pillow>=10.0
+opencv-python-headless>=4.8
+soundfile>=0.12.1
+rotary-embedding-torch
+numpy
+scipy
+
+# ── High-speed JPEG encoding (optional but strongly recommended) ───────────────
+# Install libjpeg-turbo first:  apt-get install -y libturbojpeg-dev
+# Then: pip install PyTurboJPEG
+# Falls back to cv2 automatically if not installed.
+# PyTurboJPEG>=1.7.0
+
+# ── Additional utilities ──────────────────────────────────────────────────────
+tqdm>=4.66
+ipywidgets>=8.0
+imageio
+imageio-ffmpeg
+av
+decord>=0.6.0
+lmdb>=1.4.0
+pandas>=2.0
+pyworld>=0.3.4
+pytorch-lightning
+torchmetrics
