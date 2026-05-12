@@ -62,11 +62,49 @@ class StreamingMoshi:
 
     # ── Session lifecycle ────────────────────────────────────────────────────
 
+    def close_session(self) -> None:
+        """
+        Exit the Moshi streaming contexts from the current session.
+
+        Moshi's mimi and lm_gen use streaming_forever() which calls
+        __enter__() on a streaming context manager but never __exit__().
+        We must call reset_streaming() on both before creating a new
+        InferenceState, otherwise the second session fails with:
+            AssertionError: is already streaming!
+        """
+        if self._state is None:
+            return  # No active session, nothing to close
+
+        mimi = self._runner._mimi
+        lm   = self._runner._lm
+
+        for name, obj in [("mimi", mimi), ("lm", lm)]:
+            if hasattr(obj, "reset_streaming"):
+                try:
+                    obj.reset_streaming()
+                    logger.debug(f"[StreamingMoshi] reset_streaming() called on {name}.")
+                except Exception as e:
+                    logger.warning(f"[StreamingMoshi] reset_streaming failed on {name}: {e}")
+            else:
+                # Fallback: directly clear _streaming_state on all sub-modules
+                for module in obj.modules():
+                    if hasattr(module, "_streaming_state"):
+                        module._streaming_state = None
+
+        self._state = None
+        self._first_frame_done = False
+        logger.info("[StreamingMoshi] Session closed, streaming contexts reset.")
+
     def reset_session(self) -> None:
         """
         Create a fresh InferenceState for a new WebSocket session.
-        Must be called once before starting the run() generator.
+        Automatically closes any previous session first.
         """
+        # ── Exit any previous streaming contexts ─────────────────────────────
+        # CRITICAL: must call before InferenceState() or you get:
+        #   AssertionError: is already streaming!
+        self.close_session()
+
         ci   = self._runner._checkpoint_info
         mimi = self._runner._mimi
         tt   = self._runner._text_tokenizer

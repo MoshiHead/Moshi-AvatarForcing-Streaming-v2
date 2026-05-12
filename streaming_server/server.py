@@ -386,7 +386,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 name=f"bridge_{session_id[:8]}"
             ),
             asyncio.create_task(
-                avatarforcing_loop_task(state, state.streaming_af) if state.streaming_af else _noop(),
+                # ALWAYS create the AF task — it waits internally for image_ready
+                # and reads state.streaming_af dynamically after the event fires.
+                # Do NOT use _noop() here — it returns immediately, causing
+                # asyncio.wait(FIRST_COMPLETED) to kill all other tasks instantly.
+                avatarforcing_loop_task(state),
                 name=f"af_{session_id[:8]}"
             ),
             asyncio.create_task(
@@ -415,6 +419,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         logger.error(f"[WS] Session error: {e}", exc_info=True)
     finally:
         state.error_event.set()
+        # Reset Moshi streaming contexts so reconnect doesn't fail
+        try:
+            sm.close_session()
+        except Exception:
+            pass
         # Cancel remaining tasks
         for t in state.tasks:
             if not t.done():
@@ -422,14 +431,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         if state.tasks:
             await asyncio.gather(*state.tasks, return_exceptions=True)
 
-        # Keep session in registry (client might reconnect)
-        # await _session_registry.remove(session_id)
         logger.info(f"[WS] Session {session_id[:8]} WebSocket closed.")
 
 
-async def _noop():
-    """Placeholder for sessions where AF isn't yet initialised."""
-    pass
+async def _wait_for_stop(stop_event: asyncio.Event):
+    """Persistent waiter — only exits when the session stops.
+    Use this instead of _noop() to avoid firing FIRST_COMPLETED immediately."""
+    await stop_event.wait()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -42,13 +42,16 @@ MIN_EMB_FRAMES_TO_START = 2   # very low — 2 bridge chunks = 4 audio emb frame
 
 async def avatarforcing_loop_task(
     session: "SessionState",
-    streaming_af: "StreamingAvatarForcing",
 ) -> None:
     """
     AvatarForcing block generation loop.
 
     Waits for new audio_emb to arrive, then generates one block of 4 frames.
     Runs generate_block() in a thread to avoid blocking the event loop.
+
+    NOTE: streaming_af is read from session.streaming_af AFTER image_ready fires,
+    not passed as a parameter. This is because the image upload (POST /session/{id}/image)
+    sets streaming_af asynchronously after the WebSocket is already connected.
     """
     logger.info(f"[AFLoop/{session.session_id[:8]}] Started. "
                 f"Waiting for image_ready event …")
@@ -57,7 +60,15 @@ async def avatarforcing_loop_task(
         # Wait until the reference image is uploaded + AF session started
         await asyncio.wait_for(session.image_ready.wait(), timeout=120.0)
     except asyncio.TimeoutError:
-        logger.error("[AFLoop] Timed out waiting for image upload.")
+        logger.error("[AFLoop] Timed out waiting for image upload (120s).")
+        session.error_event.set()
+        return
+
+    # Read streaming_af from session state (set by POST /session/{id}/image)
+    streaming_af = session.streaming_af
+    if streaming_af is None:
+        logger.error("[AFLoop] streaming_af is None after image_ready — "
+                     "image upload may have failed. AF loop cannot run.")
         session.error_event.set()
         return
 
