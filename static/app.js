@@ -161,7 +161,6 @@ async function startSession() {
     document.getElementById('session-id-display').textContent = sessionId;
     log(`Session created: ${sessionId.slice(0,12)}…`, 'ok');
     setStatus('connected', 'Session ready');
-    document.getElementById('btn-mic').disabled = false;
     document.getElementById('btn-stop').disabled = false;
     setIdle('Upload your face image', 'Then click Start Talking', false);
   } catch (err) {
@@ -183,6 +182,7 @@ async function uploadImage(file) {
     if (!resp.ok) throw new Error(await resp.text());
     log('Face image uploaded. AvatarForcing ready.', 'ok');
     setIdle('Ready! Click "Start Talking"', 'Mic → Moshi → Bridge → AvatarForcing', false);
+    document.getElementById('btn-mic').disabled = false;
   } catch (err) {
     log(`Image upload failed: ${err}`, 'error');
     setIdle('Upload failed', String(err), false);
@@ -462,6 +462,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-mic').disabled = true;
 
   document.getElementById('btn-start').addEventListener('click', async () => {
     await startSession();

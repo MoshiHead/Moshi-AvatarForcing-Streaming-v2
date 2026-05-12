@@ -108,6 +108,11 @@ _af_stream:       Optional[torch.cuda.Stream]            = None
 _session_registry = SessionRegistry()
 _upload_dir       = Path(tempfile.mkdtemp(prefix="af_uploads_"))
 
+# Moshi is single-session: mimi/lm are stateful objects that cannot be shared
+# across concurrent WebSocket connections. This lock ensures only one session
+# uses Moshi at a time. Acquired for the ENTIRE WS session duration.
+_moshi_lock: Optional[asyncio.Lock] = None
+
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
@@ -203,7 +208,9 @@ def _load_all_models():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load models in a thread (blocking GPU calls)
+    global _moshi_lock
+    # Startup: create async lock, then load models in a thread (blocking GPU calls)
+    _moshi_lock = asyncio.Lock()
     await asyncio.to_thread(_load_all_models)
     yield
     # Shutdown: cleanup sessions
@@ -351,87 +358,104 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=4004, reason="Session not found")
         return
 
+    # ── Moshi concurrency guard ───────────────────────────────────────────────
+    # Moshi's mimi/lm are single-session stateful objects — they cannot be shared
+    # by concurrent WebSocket connections. Accept the socket first so we can send
+    # a clean rejection frame, then check if the lock is already held.
     await websocket.accept()
+
+    if _moshi_lock is None or _moshi_lock.locked():
+        logger.warning(f"[WS] Rejected session {session_id[:8]}: Moshi already in use.")
+        await websocket.close(
+            code=4029,
+            reason="Server busy: another session is active. Please wait and reconnect."
+        )
+        return
+
     logger.info(f"[WS] Client connected: session={session_id[:8]}")
 
-    # ── Create per-session pipeline adapters ─────────────────────────────────
-    device = torch.device(CFG["DEVICE"])
+    # Acquire Moshi lock for the entire session duration
+    async with _moshi_lock:
+        # Reset error_event so a reconnecting client starts clean
+        state.error_event.clear()
 
-    # Moshi adapter (per-session InferenceState)
-    sm = StreamingMoshi(_moshi_runner)
-    sm.reset_session()
+        # ── Create per-session pipeline adapters ─────────────────────────────
+        device = torch.device(CFG["DEVICE"])
 
-    # Bridge adapter (per-session KV-cache)
-    sb = StreamingBridge(
-        model       = _bridge_model,
-        device      = device,
-        cuda_stream = _bridge_stream,
-    )
-    sb.reset_session()
-    state.streaming_bridge = sb
+        # Moshi adapter — reset_session() unconditionally clears any prior streaming state
+        sm = StreamingMoshi(_moshi_runner)
+        sm.reset_session()
 
-    try:
-        # ── Launch all background tasks ─────────────────────────────────────
-        tasks = [
-            asyncio.create_task(
-                audio_receive_task(websocket, state),
-                name=f"audio_recv_{session_id[:8]}"
-            ),
-            asyncio.create_task(
-                moshi_loop_task(websocket, state, sm),
-                name=f"moshi_{session_id[:8]}"
-            ),
-            asyncio.create_task(
-                bridge_loop_task(state, sb),
-                name=f"bridge_{session_id[:8]}"
-            ),
-            asyncio.create_task(
-                # ALWAYS create the AF task — it waits internally for image_ready
-                # and reads state.streaming_af dynamically after the event fires.
-                # Do NOT use _noop() here — it returns immediately, causing
-                # asyncio.wait(FIRST_COMPLETED) to kill all other tasks instantly.
-                avatarforcing_loop_task(state),
-                name=f"af_{session_id[:8]}"
-            ),
-            asyncio.create_task(
-                frame_encode_loop_task(state, _jpeg_encoder),
-                name=f"encode_{session_id[:8]}"
-            ),
-            asyncio.create_task(
-                keepalive_loop_task(websocket, state),
-                name=f"keepalive_{session_id[:8]}"
-            ),
-        ]
-        state.tasks = tasks
-
-        # ── Wait for any task to finish (error or disconnect) ───────────────
-        done, pending = await asyncio.wait(
-            tasks, return_when=asyncio.FIRST_COMPLETED
+        # Bridge adapter (per-session KV-cache)
+        sb = StreamingBridge(
+            model       = _bridge_model,
+            device      = device,
+            cuda_stream = _bridge_stream,
         )
+        sb.reset_session()
+        state.streaming_bridge = sb
 
-        for t in done:
-            if t.exception():
-                logger.error(f"[WS] Task {t.get_name()} raised: {t.exception()}")
-
-    except WebSocketDisconnect:
-        logger.info(f"[WS] Client disconnected: {session_id[:8]}")
-    except Exception as e:
-        logger.error(f"[WS] Session error: {e}", exc_info=True)
-    finally:
-        state.error_event.set()
-        # Reset Moshi streaming contexts so reconnect doesn't fail
         try:
-            sm.close_session()
-        except Exception:
-            pass
-        # Cancel remaining tasks
-        for t in state.tasks:
-            if not t.done():
-                t.cancel()
-        if state.tasks:
-            await asyncio.gather(*state.tasks, return_exceptions=True)
+            # ── Launch all background tasks ─────────────────────────────────
+            tasks = [
+                asyncio.create_task(
+                    audio_receive_task(websocket, state),
+                    name=f"audio_recv_{session_id[:8]}"
+                ),
+                asyncio.create_task(
+                    moshi_loop_task(websocket, state, sm),
+                    name=f"moshi_{session_id[:8]}"
+                ),
+                asyncio.create_task(
+                    bridge_loop_task(state, sb),
+                    name=f"bridge_{session_id[:8]}"
+                ),
+                asyncio.create_task(
+                    # Always create AF task — it waits internally for image_ready.
+                    # Never use _noop() here (fires FIRST_COMPLETED immediately).
+                    avatarforcing_loop_task(state),
+                    name=f"af_{session_id[:8]}"
+                ),
+                asyncio.create_task(
+                    frame_encode_loop_task(state, _jpeg_encoder),
+                    name=f"encode_{session_id[:8]}"
+                ),
+                asyncio.create_task(
+                    keepalive_loop_task(websocket, state),
+                    name=f"keepalive_{session_id[:8]}"
+                ),
+            ]
+            state.tasks = tasks
 
-        logger.info(f"[WS] Session {session_id[:8]} WebSocket closed.")
+            # Wait for any task to finish (error or disconnect)
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for t in done:
+                if not t.cancelled() and t.exception():
+                    logger.error(f"[WS] Task {t.get_name()} raised: {t.exception()}")
+
+        except WebSocketDisconnect:
+            logger.info(f"[WS] Client disconnected: {session_id[:8]}")
+        except Exception as e:
+            logger.error(f"[WS] Session error: {e}", exc_info=True)
+        finally:
+            state.error_event.set()
+            # Reset Moshi streaming contexts BEFORE lock releases
+            try:
+                sm.close_session()
+            except Exception:
+                pass
+            # Cancel remaining tasks
+            for t in state.tasks:
+                if not t.done():
+                    t.cancel()
+            if state.tasks:
+                await asyncio.gather(*state.tasks, return_exceptions=True)
+
+            logger.info(f"[WS] Session {session_id[:8]} WebSocket closed.")
+
 
 
 async def _wait_for_stop(stop_event: asyncio.Event):

@@ -6,7 +6,7 @@ Async streaming adapter for Moshi.
 Converts the existing file-based MoshiRunner into a live session that:
   - Accepts audio chunks from an asyncio.Queue (browser mic PCM)
   - Maintains a persistent InferenceState across the full session
-  - Yields (pcm_chunk, audio_tokens, text_token, seq) per Moshi LM step
+  - Yields (seq, pcm_chunk, audio_tokens, text_token) per Moshi LM step
   - Yields asyncio event-loop control after every step (asyncio.sleep(0))
 
 Audio input: raw int16 PCM at 24kHz (FRAME_SIZE=1920 samples per chunk).
@@ -14,8 +14,13 @@ Audio output: float32 PCM at 24kHz (1920 samples) + 8 acoustic token indices.
 
 Critical design decisions:
   - InferenceState is created ONCE per session and kept alive for the entire session.
-  - First-frame double-step is replicated faithfully from moshi_runner.py.
-  - All GPU ops run under torch.no_grad() and bfloat16 autocast.
+  - close_session() resets mimi/lm streaming state UNCONDITIONALLY — multiple
+    StreamingMoshi instances share the same underlying mimi/lm via _runner, so
+    a new instance (self._state=None) must still reset shared state from a prior
+    instance. Never bail early in close_session().
+  - No torch.autocast around Moshi calls — Moshi pre-allocates its KV cache at
+    a fixed dtype on load. Autocast changes k/v tensor dtypes mid-inference,
+    causing: scatter(): Expected self.dtype to be equal to src.dtype
 """
 
 from __future__ import annotations
@@ -51,8 +56,9 @@ class StreamingMoshi:
     Usage per session:
         sm = StreamingMoshi(runner)
         sm.reset_session()          # called once at WS connect
-        async for result in sm.run(audio_queue, stop_event):
+        async for result in sm.run(audio_queue, stop_event, seq_fn):
             seq, pcm, audio_toks, text_tok = result
+        sm.close_session()          # called at WS disconnect
     """
 
     def __init__(self, runner: MoshiRunner):
@@ -64,45 +70,51 @@ class StreamingMoshi:
 
     def close_session(self) -> None:
         """
-        Exit the Moshi streaming contexts from the current session.
+        Reset mimi and lm_gen streaming contexts UNCONDITIONALLY.
 
-        Moshi's mimi and lm_gen use streaming_forever() which calls
-        __enter__() on a streaming context manager but never __exit__().
-        We must call reset_streaming() on both before creating a new
-        InferenceState, otherwise the second session fails with:
+        CRITICAL: Multiple StreamingMoshi instances share the SAME underlying
+        mimi/lm objects via _runner. A freshly created instance has
+        self._state = None, but the shared mimi/lm may still hold streaming
+        state from a previous instance. We NEVER bail early — always reset.
+
+        Failing to do this on every disconnect causes:
             AssertionError: is already streaming!
+        on the next connection attempt.
         """
-        if self._state is None:
-            return  # No active session, nothing to close
-
         mimi = self._runner._mimi
         lm   = self._runner._lm
 
         for name, obj in [("mimi", mimi), ("lm", lm)]:
+            # Preferred path: Moshi's own reset_streaming() API
             if hasattr(obj, "reset_streaming"):
                 try:
                     obj.reset_streaming()
-                    logger.debug(f"[StreamingMoshi] reset_streaming() called on {name}.")
+                    logger.debug(f"[StreamingMoshi] reset_streaming() on {name}.")
                 except Exception as e:
                     logger.warning(f"[StreamingMoshi] reset_streaming failed on {name}: {e}")
             else:
-                # Fallback: directly clear _streaming_state on all sub-modules
+                # Fallback: walk every sub-module and clear _streaming_state
+                cleared = 0
                 for module in obj.modules():
                     if hasattr(module, "_streaming_state"):
                         module._streaming_state = None
+                        cleared += 1
+                if cleared:
+                    logger.debug(f"[StreamingMoshi] Cleared _streaming_state on "
+                                 f"{cleared} {name} sub-modules (fallback).")
 
         self._state = None
         self._first_frame_done = False
-        logger.info("[StreamingMoshi] Session closed, streaming contexts reset.")
+        logger.info("[StreamingMoshi] Streaming contexts reset (close_session).")
 
     def reset_session(self) -> None:
         """
         Create a fresh InferenceState for a new WebSocket session.
-        Automatically closes any previous session first.
+        Always calls close_session() first to guarantee clean state.
         """
-        # ── Exit any previous streaming contexts ─────────────────────────────
-        # CRITICAL: must call before InferenceState() or you get:
-        #   AssertionError: is already streaming!
+        # ── Always reset streaming state first ───────────────────────────────
+        # Even if self._state is None (new instance), the shared mimi/lm may
+        # hold state from a previous session's StreamingMoshi instance.
         self.close_session()
 
         ci   = self._runner._checkpoint_info
@@ -127,7 +139,7 @@ class StreamingMoshi:
         self,
         audio_queue: asyncio.Queue,
         stop_event: asyncio.Event,
-        seq_counter_fn,          # callable() → int, supplies monotonic seq IDs
+        seq_counter_fn,          # callable() → int, monotonic seq IDs
     ) -> AsyncIterator[Tuple[int, torch.Tensor, torch.Tensor, int]]:
         """
         Main streaming loop. Yields one result per Moshi LM step.
@@ -169,16 +181,18 @@ class StreamingMoshi:
                     pcm_in = pcm_in.unsqueeze(0)
                 pcm_in = pcm_in.to(dev)
 
-                # ── Mimi encode ──────────────────────────────────────────
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                    codes = mimi.encode(pcm_in)   # (1, n_codebooks, 1)
+                # ── Mimi encode + LM step ────────────────────────────────
+                # NO autocast: Moshi pre-allocates KV cache at a fixed dtype
+                # on load. Autocast converts k/v tensors to bfloat16 mid-
+                # inference, causing scatter() dtype mismatch in the cache.
+                codes = mimi.encode(pcm_in)   # (1, n_codebooks, 1)
 
-                    # First-frame: double step to handle causal delay
-                    if not self._first_frame_done:
-                        _ = state.lm_gen.step(codes)
-                        self._first_frame_done = True
+                # First-frame: double step to handle causal delay
+                if not self._first_frame_done:
+                    _ = state.lm_gen.step(codes)
+                    self._first_frame_done = True
 
-                    tokens = state.lm_gen.step(codes)  # (1, dep_q+1, 1) | None
+                tokens = state.lm_gen.step(codes)  # (1, dep_q+1, 1) | None
 
                 # ── Yield event-loop control (prevents starvation) ───────
                 await asyncio.sleep(0)
@@ -190,9 +204,8 @@ class StreamingMoshi:
                 text_tok   = int(tokens[:, 0, 0].item())
                 audio_toks = tokens[:, 1:, :]               # (1, 8, 1)
 
-                # Decode response audio
-                with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                    pcm_out = mimi.decode(audio_toks)        # (1, 1, FRAME_SIZE)
+                # Decode response audio — also no autocast
+                pcm_out = mimi.decode(audio_toks)            # (1, 1, FRAME_SIZE)
 
                 pcm_out    = pcm_out.squeeze(1).cpu().float()  # (1, FRAME_SIZE)
                 audio_toks = audio_toks[:, :, 0].cpu()         # (1, 8)
@@ -200,7 +213,7 @@ class StreamingMoshi:
                 seq = seq_counter_fn()
                 yield seq, pcm_out, audio_toks, text_tok
 
-                # Yield again after yielding to ensure downstream tasks run
+                # Yield again to ensure downstream tasks run
                 await asyncio.sleep(0)
 
         logger.info("[StreamingMoshi] run() loop exited.")
